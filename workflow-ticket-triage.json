@@ -1,0 +1,289 @@
+{
+  "name": "Ticket triage to RAG reply draft",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ticket",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "1a2b3c4d-0001-4000-8000-000000000001",
+      "name": "Ticket received",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -320,
+        0
+      ],
+      "webhookId": "ticket-triage"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.RAG_BASE_URL }}/api/ask",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ question: 'Ticket subject: ' + $json.body.subject + '\\nTicket body: ' + $json.body.body, top_k: 4, generate: true }) }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "1a2b3c4d-0002-4000-8000-000000000002",
+      "name": "Ask RAG for a cited draft",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -80,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// One item in, one item out. Three outcomes stay distinct because the\n// caller must never see a refusal or a failure dressed up as a draft.\nreturn items.map((item) => {\n  const j = item.json || {};\n  const err = j.error;\n  const answer = typeof j.answer === 'string' ? j.answer.trim() : '';\n  const refused = j.refused === true;\n  const sources = Array.isArray(j.hits)\n    ? j.hits.map((h) => h.source || h.title || h.id).filter(Boolean).slice(0, 3)\n    : [];\n\n  let outcome = 'draft';\n  let reason = null;\n  if (err) {\n    outcome = 'failed';\n    reason = typeof err === 'string' ? err : JSON.stringify(err);\n  } else if (refused) {\n    outcome = 'refused';\n    reason = j.reason || 'the service declined to answer';\n  } else if (!answer) {\n    outcome = 'failed';\n    reason = 'the service returned no answer';\n  }\n\n  return {\n    json: {\n      outcome,\n      reason,\n      reply: outcome === 'draft' ? answer : '',\n      sources,\n      needs_human: outcome !== 'draft',\n    },\n  };\n});"
+      },
+      "id": "1a2b3c4d-0003-4000-8000-000000000003",
+      "name": "Classify draft, refusal, failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.needs_human }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        }
+      },
+      "id": "1a2b3c4d-0004-4000-8000-000000000004",
+      "name": "Escalate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        400,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "queue",
+              "value": "human-review",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "note",
+              "value": "={{ 'Agent to reply manually: ' + $json.reason }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "1a2b3c4d-0005-4000-8000-000000000005",
+      "name": "Hand to an agent",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        640,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "b1",
+              "name": "queue",
+              "value": "draft-ready",
+              "type": "string"
+            },
+            {
+              "id": "b2",
+              "name": "draft",
+              "value": "={{ $json.reply }}",
+              "type": "string"
+            },
+            {
+              "id": "b3",
+              "name": "sources",
+              "value": "={{ $json.sources.join(', ') }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "1a2b3c4d-0006-4000-8000-000000000006",
+      "name": "Attach draft for approval",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        640,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "1a2b3c4d-0007-4000-8000-000000000007",
+      "name": "Reply to caller",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        900,
+        0
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "1a2b3c4d-0008-4000-8000-000000000008",
+      "name": "Run manually",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -560,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Two tickets in the same shape the webhook receives, so one run\n// exercises both branches: a draft we can send, and a refusal.\nreturn [\n  { json: { body: { subject: 'Order not delivered',\n                    body: 'I paid on Monday and nothing arrived, I want a refund.' } } },\n  { json: { body: { subject: 'REFUSE_ME landlord refuses to return deposit',\n                    body: 'REFUSE_ME my landlord refuses to return my deposit' } } }\n];"
+      },
+      "id": "1a2b3c4d-0009-4000-8000-000000000009",
+      "name": "Sample tickets (same shape as the webhook)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -320,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "Ticket received": {
+      "main": [
+        [
+          {
+            "node": "Ask RAG for a cited draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask RAG for a cited draft": {
+      "main": [
+        [
+          {
+            "node": "Classify draft, refusal, failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify draft, refusal, failure": {
+      "main": [
+        [
+          {
+            "node": "Escalate?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Escalate?": {
+      "main": [
+        [
+          {
+            "node": "Hand to an agent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Attach draft for approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hand to an agent": {
+      "main": [
+        [
+          {
+            "node": "Reply to caller",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach draft for approval": {
+      "main": [
+        [
+          {
+            "node": "Reply to caller",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run manually": {
+      "main": [
+        [
+          {
+            "node": "Sample tickets (same shape as the webhook)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sample tickets (same shape as the webhook)": {
+      "main": [
+        [
+          {
+            "node": "Ask RAG for a cited draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "id": "ticket-triage"
+}
